@@ -12,6 +12,8 @@ contract MarketToken is Ownable {
     using SafeMath for uint256;
 
     event BetPlaced(address indexed sender, Answer betPlaced, uint256 amountBet);
+    event MarketStatusChanged(bytes16 indexed action, MarketStatus status);
+    event WinnerPicked(bool response);
 
     enum Answer { NONE, TRUE, FALSE }
     enum MarketStatus { OPEN, PAUSE, CLOSED }
@@ -38,6 +40,11 @@ contract MarketToken is Ownable {
     Answer public wrongBet;
     bool public hasApproved;
 
+    modifier onlyOracle {
+        require(msg.sender == _oracle);
+        _;
+    }
+
     constructor (address oracle, address feeCollector, IERC20 dai) {
         _DAI = dai;
         _feeCollector = feeCollector;
@@ -62,6 +69,21 @@ contract MarketToken is Ownable {
         // Refer to "./Wallet.sol" for definition
         escrow[Answer.TRUE].approve(_DAI, address(this), true);
         escrow[Answer.FALSE].approve(_DAI, address(this), true);
+    }
+
+    function pause() public onlyOwner {
+        status = MarketStatus.PAUSE;
+        emit MarketStatusChanged("paused", MarketStatus.PAUSE);
+    }
+
+    function resume() public onlyOwner {
+        status = MarketStatus.OPEN;
+        emit MarketStatusChanged("opened", MarketStatus.OPEN);
+    }
+
+    function stop() public onlyOwner {
+        status = MarketStatus.CLOSED;
+        emit MarketStatusChanged("closed", MarketStatus.CLOSED);
     }
 
     function enter(uint256 amount, Answer _bet) external {
@@ -98,5 +120,40 @@ contract MarketToken is Ownable {
         stakes[_bet][msg.sender] = stake;
 
         emit BetPlaced(msg.sender, stake.bet, stake.amount);
+    }
+
+    function pickWinner(bool response) external onlyOracle {
+        require(status == MarketStatus.CLOSED, "Market is still open");
+
+        if (response) {
+            bet = Answer.TRUE;
+            wrongBet = Answer.FALSE;
+        } else {
+            bet = Answer.FALSE;
+            wrongBet = Answer.TRUE;
+        }
+
+        emit WinnerPicked(response);
+    }
+
+    function claim() public {
+        Stake memory stake = stakes[bet][msg.sender];
+        require(stake.bet != Answer.NONE && stake.amount > 0, "No rewards to claim");
+
+        delete stakes[bet][msg.sender];
+        uint256 feepct = 5;
+        uint256 position = (stake.amount * feepct) / 100;
+        uint256 owed = (stake.amount - position);
+        uint256 count = (bet == Answer.TRUE) ? 
+            _FalseCounter.current() : 
+            _TrueCounter.current();
+
+        uint256 winnings = (_DAI.balanceOf(address(escrow[otherBet])) / count);
+
+        //Return Initial
+        _DAI.transferFrom(address(escrow[bet]), msg.sender, owed);
+
+        //Send Profits
+        _DAI.transferFrom(address(escrow[otherBet]), msg.sender, winnings);
     }
 }
